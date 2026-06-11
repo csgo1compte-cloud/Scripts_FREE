@@ -1,0 +1,515 @@
+-- ══════════════════════════════════════════════
+--  NUKE MERGER — by AKkiwi
+-- ══════════════════════════════════════════════
+
+
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local player = Players.LocalPlayer
+
+
+-- ── UI ──
+local Ui = loadstring(game:HttpGet("https://raw.githubusercontent.com/csgo1compte-cloud/RayVoid/refs/heads/main/RayVoid"))()
+Ui:SetScriptName("Merge a nuke")
+Ui:ShowCredit(function()
+
+
+
+local Window = Ui:CreateWindow({
+    Name = "Nuke Merger",
+    LoadingTitle = "Nuke Merger",
+    LoadingSubtitle = "by AKkiwi",
+    ConfigurationSaving = { Enabled = false },
+    KeySystem = false,
+})
+
+
+-- ── Remotes ──
+local NukeRemotes     = ReplicatedStorage:WaitForChild("NukeRemotes")
+local PickUp          = NukeRemotes:WaitForChild("PickUp")
+local Drop            = NukeRemotes:WaitForChild("Drop")
+local MergeRequest    = NukeRemotes:WaitForChild("MergeRequest")
+local PurchaseUpgrade = NukeRemotes:WaitForChild("PurchaseUpgrade")
+local RequestLockBase = NukeRemotes:WaitForChild("RequestLockBase")
+local HoldStarted     = NukeRemotes:WaitForChild("HoldStarted")
+local HoldEnded       = NukeRemotes:WaitForChild("HoldEnded")
+
+
+-- ════════════════════════════════════════════
+--  TAB 1 — AUTO MERGE
+-- ════════════════════════════════════════════
+local MergeTab = Window:CreateTab("Auto Merge", 4483362458)
+MergeTab:CreateSection("Automation")
+
+
+-- ── Config ──
+local WALK_SPEED    = 45
+local DEFAULT_SPEED = 16
+local DROP_DEBOUNCE = 0.75
+
+
+-- ── State ──
+local mergeRunning  = false
+local manualUnblock = false
+local isHolding     = false
+local heldTier      = nil
+local loopThread    = nil
+local allowPickup   = false
+
+
+-- ── Hook PickUp — UNE SEULE FOIS ──
+local hookOriginal
+hookOriginal = hookmetamethod(game, "__namecall", function(self, ...)
+    local method = getnamecallmethod()
+    if method == "FireServer" and self == PickUp then
+        if manualUnblock or not mergeRunning then
+            return hookOriginal(self, ...)
+        end
+        if allowPickup then
+            allowPickup = false
+            return hookOriginal(self, ...)
+        end
+        return
+    end
+    return hookOriginal(self, ...)
+end)
+
+
+-- ── Events natifs ──
+HoldStarted.OnClientEvent:Connect(function(tier)
+    isHolding = true
+    heldTier  = tier
+end)
+HoldEnded.OnClientEvent:Connect(function()
+    isHolding = false
+    heldTier  = nil
+end)
+
+
+-- ── Helpers communs ──
+local function getHRP()
+    local char = player.Character
+    return char and char:FindFirstChild("HumanoidRootPart")
+end
+
+
+local function getHum()
+    local char = player.Character
+    return char and char:FindFirstChildOfClass("Humanoid")
+end
+
+
+local function getMyNukesFolder()
+    local Bases = workspace:FindFirstChild("Bases")
+    if not Bases then return nil end
+    for _, base in ipairs(Bases:GetChildren()) do
+        local nukes = base:FindFirstChild("Nukes")
+        if nukes then
+            for _, n in ipairs(nukes:GetChildren()) do
+                if n:GetAttribute("OwnerUserId") == player.UserId then
+                    return nukes
+                end
+            end
+        end
+    end
+    return nil
+end
+
+
+local function getMyBasePosition()
+    local Bases = workspace:FindFirstChild("Bases")
+    if not Bases then return nil end
+    for _, base in ipairs(Bases:GetChildren()) do
+        local nukes = base:FindFirstChild("Nukes")
+        if nukes then
+            for _, n in ipairs(nukes:GetChildren()) do
+                if n:GetAttribute("OwnerUserId") == player.UserId then
+                    local model = base:FindFirstChild("Model")
+                    if model then
+                        local ok, pivot = pcall(function() return model:GetPivot() end)
+                        if ok then return pivot.Position end
+                    end
+                end
+            end
+        end
+    end
+    return nil
+end
+
+
+local function getFloorNukes(folder)
+    local result = {}
+    for _, n in ipairs(folder:GetChildren()) do
+        local state = n:GetAttribute("State")
+        if n:IsA("BasePart") and (state == "floor" or state == "based") then
+            table.insert(result, n)
+        end
+    end
+    return result
+end
+
+
+local function doPickup(nuke)
+    allowPickup = true
+    PickUp:FireServer(nuke)
+    task.delay(2, function()
+        if allowPickup then allowPickup = false end
+    end)
+end
+
+
+local function doDrop()
+    local hrp = getHRP()
+    if not hrp then return end
+    Drop:FireServer(hrp.CFrame)
+    task.wait(DROP_DEBOUNCE + 0.1)
+end
+
+
+-- ── Loop Merge ──
+local function doMergeLoop()
+    if isHolding then doDrop() end
+
+
+    while mergeRunning do
+        task.wait(0.15)
+
+
+        local hrp = getHRP()
+        if not hrp then continue end
+        local hum = getHum()
+        if not hum then continue end
+        local folder = getMyNukesFolder()
+        if not folder then continue end
+
+
+        local nukes = getFloorNukes(folder)
+
+
+        local byTier = {}
+        for _, n in ipairs(nukes) do
+            local tier = n:GetAttribute("Tier")
+            if tier then
+                if not byTier[tier] then byTier[tier] = { count = 0, nukes = {} } end
+                byTier[tier].count += 1
+                table.insert(byTier[tier].nukes, n)
+            end
+        end
+        if isHolding and heldTier then
+            if not byTier[heldTier] then byTier[heldTier] = { count = 0, nukes = {} } end
+            byTier[heldTier].count += 1
+        end
+
+
+        local bestTier = nil
+        for tier, data in pairs(byTier) do
+            if data.count >= 2 and (not bestTier or tier > bestTier) then
+                bestTier = tier
+            end
+        end
+
+
+        if isHolding then
+            hum.WalkSpeed = DEFAULT_SPEED
+            if bestTier and heldTier == bestTier then
+                local floorPair = byTier[bestTier].nukes[1]
+                if floorPair then
+                    MergeRequest:FireServer(floorPair)
+                    task.wait(0.1)
+                end
+            elseif bestTier then
+                doDrop()
+            end
+        else
+            if bestTier then
+                local target = byTier[bestTier].nukes[1]
+                local dist = (hrp.Position - target.Position).Magnitude
+                if dist <= 6 then
+                    if not isHolding then
+                        doPickup(target)
+                        task.wait(0.3)
+                    end
+                else
+                    hum.WalkSpeed = WALK_SPEED
+                    hum:MoveTo(target.Position)
+                end
+            else
+                hum.WalkSpeed = DEFAULT_SPEED
+            end
+        end
+    end
+
+
+    local hum = getHum()
+    if hum then hum.WalkSpeed = DEFAULT_SPEED end
+end
+
+
+MergeTab:CreateToggle({
+    Name = "Auto Merge",
+    CurrentValue = false,
+    Flag = "AutoMerge",
+    Callback = function(val)
+        mergeRunning = val
+        if val then
+            manualUnblock = false
+            loopThread = task.spawn(doMergeLoop)
+            Ui:Notify({ Title = "Auto Merge", Content = "Enabled", Duration = 2, Image = 4483362458 })
+        else
+            mergeRunning = false
+            allowPickup  = false
+            if loopThread then task.cancel(loopThread); loopThread = nil end
+            local hum = getHum()
+            if hum then hum.WalkSpeed = DEFAULT_SPEED end
+            if isHolding then doDrop() end
+            Ui:Notify({ Title = "Auto Merge", Content = "Disabled", Duration = 2, Image = 4483362458 })
+        end
+    end,
+})
+
+
+MergeTab:CreateSection("Remote Control")
+
+
+MergeTab:CreateParagraph({
+    Title = "⚠️ Unblock PickUp Remote",
+    Content = "Unblocking may cause bugs or unexpected behavior in the Auto Merge. Use this only if the auto merge is stuck or looping.",
+})
+
+
+MergeTab:CreateToggle({
+    Name = "Force Unblock PickUp",
+    CurrentValue = false,
+    Flag = "ManualUnblock",
+    Callback = function(val)
+        manualUnblock = val
+        if val then
+            Ui:Notify({ Title = "PickUp Remote", Content = "Force unblocked", Duration = 3, Image = 4483362458 })
+        else
+            Ui:Notify({ Title = "PickUp Remote", Content = "Blocked again",   Duration = 2, Image = 4483362458 })
+        end
+    end,
+})
+
+
+-- ════════════════════════════════════════════
+--  TAB 2 — AUTO UPGRADE
+-- ════════════════════════════════════════════
+local UpgradeTab = Window:CreateTab("Auto Upgrade", 4483362458)
+UpgradeTab:CreateSection("Upgrades")
+
+
+local function parseShortNumber(text)
+    if not text then return 0 end
+    local num, suffix = text:match("([%d%.]+)%s*([A-Za-z]*)")
+    if not num then return 0 end
+    num = tonumber(num) or 0
+    suffix = suffix:upper()
+    local mult = {
+        K = 1e3, M = 1e6, B = 1e9, T = 1e12,
+        QA = 1e15, QI = 1e18, SX = 1e21, SP = 1e24,
+    }
+    return num * (mult[suffix] or 1)
+end
+
+
+local function getCash()
+    local ok, label = pcall(function()
+        return player.PlayerGui.ScreenGui.CashText
+    end)
+    if not ok or not label then return 0 end
+    return parseShortNumber(label.Text)
+end
+
+
+local function getUpgradePrice(upgradeKey)
+    local ok, label = pcall(function()
+        return player.PlayerGui.ScreenGui.Frames.UpgradesFrame.Frame[upgradeKey].Upgrade.TextLabel
+    end)
+    if not ok or not label then return math.huge end
+    return parseShortNumber(label.Text)
+end
+
+
+local upgradeThreads = {}
+
+
+local upgrades = {
+    { name = "Auto Upgrade Tier",     remote = "TIER",     key = "Tier"     },
+    { name = "Auto Upgrade Max",      remote = "MAX",      key = "Max"      },
+    { name = "Auto Upgrade LockBase", remote = "LOCKBASE", key = "LockBase" },
+}
+
+
+for _, upg in ipairs(upgrades) do
+    local flag = upg.remote
+    UpgradeTab:CreateToggle({
+        Name = upg.name,
+        CurrentValue = false,
+        Flag = flag,
+        Callback = function(val)
+            if val then
+                upgradeThreads[flag] = true
+                task.spawn(function()
+                    while upgradeThreads[flag] do
+                        task.wait(1)
+                        local cash  = getCash()
+                        local price = getUpgradePrice(upg.key)
+                        if cash >= price then
+                            PurchaseUpgrade:FireServer(upg.remote)
+                        end
+                    end
+                end)
+                Ui:Notify({ Title = upg.name, Content = "Enabled",  Duration = 2, Image = 4483362458 })
+            else
+                upgradeThreads[flag] = nil
+                Ui:Notify({ Title = upg.name, Content = "Disabled", Duration = 2, Image = 4483362458 })
+            end
+        end,
+    })
+end
+
+
+-- ════════════════════════════════════════════
+--  TAB 3 — AUTO LOCK
+-- ════════════════════════════════════════════
+local LockTab = Window:CreateTab("Auto Lock", 4483362458)
+LockTab:CreateSection("Base Defense")
+
+
+-- ── Constantes ──
+local MIDDLE_X        = 412.5
+local MIDDLE_Z        = 135
+local MIDDLE_HALF_X   = 71.5   -- 143 / 2
+local MIDDLE_HALF_Z   = 73.25  -- 146.5 / 2
+local DETECT_RADIUS   = 50     -- studs depuis le pivot de la base
+
+
+local autoLockEnabled = false
+local lockConnection  = nil
+
+
+local function isInMiddle(pos)
+    return math.abs(pos.X - MIDDLE_X) <= MIDDLE_HALF_X
+        and math.abs(pos.Z - MIDDLE_Z) <= MIDDLE_HALF_Z
+end
+
+
+-- Distance perpendiculaire 2D (XZ) d'un point à une droite
+local function isHeadingToBase(pos1, pos2, basePos)
+    local dx = pos2.X - pos1.X
+    local dz = pos2.Z - pos1.Z
+    local len = math.sqrt(dx*dx + dz*dz)
+    if len < 0.001 then return false end
+    dx, dz = dx/len, dz/len
+
+
+    local px = basePos.X - pos1.X
+    local pz = basePos.Z - pos1.Z
+
+
+    -- Distance perpendiculaire (produit vectoriel 2D)
+    local dist = math.abs(px * dz - pz * dx)
+
+
+    -- t > 0 = la base est devant la nuke, pas derrière
+    local t = px * dx + pz * dz
+
+
+    return dist <= DETECT_RADIUS and t > 0
+end
+
+
+local function canLockBase()
+    local ok, label = pcall(function()
+        return player.PlayerGui.ScreenGui.Top.LockBase.TextLabel
+    end)
+    if not ok or not label then return false end
+    return label.Text == "Lock Base"
+end
+
+
+local function handleNuke(nuke)
+    task.wait(0.1) -- laisser les attributes se charger
+    if not nuke.Parent then return end
+    if nuke:GetAttribute("LauncherUserId") == player.UserId then return end
+
+
+    local sampleA = nil
+
+
+    while nuke.Parent and autoLockEnabled do
+        task.wait(0.2)
+        if not nuke.Parent then return end -- nuke a touché sa cible, on ignore
+
+
+        local pos = nuke.Position
+
+
+        if isInMiddle(pos) then
+            -- Nuke dans la zone du middle → reset et attendre qu'elle sorte
+            sampleA = nil
+        else
+            if not sampleA then
+                sampleA = pos
+            else
+                -- On a 2 samples consécutifs hors du middle → on prédit
+                local basePos = getMyBasePosition()
+                if not basePos then return end
+
+
+                if isHeadingToBase(sampleA, pos, basePos) then
+                    if canLockBase() then
+                        RequestLockBase:FireServer()
+                        Ui:Notify({
+                            Title    = "Auto Lock",
+                            Content  = "Incoming nuke detected — Base locked!",
+                            Duration = 4,
+                            Image    = 4483362458,
+                        })
+                    else
+                        Ui:Notify({
+                            Title    = "Auto Lock",
+                            Content  = "Incoming nuke — Lock on cooldown!",
+                            Duration = 4,
+                            Image    = 4483362458,
+                        })
+                    end
+                end
+                return -- traitement terminé pour cette nuke
+            end
+        end
+    end
+end
+
+
+LockTab:CreateToggle({
+    Name = "Auto Lock on Attack",
+    CurrentValue = false,
+    Flag = "AutoLock",
+    Callback = function(val)
+        autoLockEnabled = val
+        if val then
+            lockConnection = workspace.ChildAdded:Connect(function(child)
+                if child.Name:match("^LaunchedNuke") then
+                    task.spawn(handleNuke, child)
+                end
+            end)
+            -- Nukes déjà en vol au moment de l'activation
+            for _, child in ipairs(workspace:GetChildren()) do
+                if child.Name:match("^LaunchedNuke") then
+                    task.spawn(handleNuke, child)
+                end
+            end
+            Ui:Notify({ Title = "Auto Lock", Content = "Enabled",  Duration = 2, Image = 4483362458 })
+        else
+            autoLockEnabled = false
+            if lockConnection then
+                lockConnection:Disconnect()
+                lockConnection = nil
+            end
+            Ui:Notify({ Title = "Auto Lock", Content = "Disabled", Duration = 2, Image = 4483362458 })
+        end
+    end,
+})
+end)
